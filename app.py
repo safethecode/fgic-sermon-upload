@@ -18,6 +18,17 @@ import platform
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QShortcut
 import time
+import json
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select
+from selenium.webdriver.chrome.options import Options
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import gc
+import sip
 
 # .env 파일에서 환경변수 로드
 load_dotenv()
@@ -144,31 +155,52 @@ class BibleAPI:
 
 class YouTubeAPI:
     def __init__(self):
-        api_key = os.getenv('YOUTUBE_API_KEY')
-        self.youtube = build('youtube', 'v3', developerKey=api_key)
-        
+        self.api_keys = [
+            'API_KEY를 넣으세요.',
+        ]
+        self.current_key_index = 0
+        self.youtube = self.create_youtube_service()
+        self.channel_id = 'UCgeZJWROaoIP3VV2_d7CJlQ'  # @hyotv4508
+    
+    def create_youtube_service(self):
+        """현재 API 키로 YouTube 서비스 생성"""
+        return build('youtube', 'v3', developerKey=self.api_keys[self.current_key_index])
+    
+    def switch_to_next_key(self):
+        """다음 API 키로 전환"""
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        self.youtube = self.create_youtube_service()
+        print(f"YouTube API 키 전환: {self.current_key_index + 1}번째 키로 전환")
+    
     def search_sermon(self, title, date):
-        """설교 검색 - 할당량 초과시 기본 URL 반환"""
-        try:
-            search_query = f"{title}({date.strftime('%Y년 %m월 %d일')} 주일설교) - 최성규 목사"
-            
-            request = self.youtube.search().list(
-                q=search_query,
-                part='id',
-                maxResults=1
-            )
-            response = request.execute()
-            
-            if response['items']:
-                video_id = response['items'][0]['id']['videoId']
-                return f"https://www.youtube.com/embed/{video_id}"
-            
-        except Exception as e:
-            print(f"YouTube API 에러: {e}")
-            # API 할당량 초과시 빈 값 반환
-            return ""
+        """설교 검색 with API 키 순환"""
+        for _ in range(len(self.api_keys)):  # API 키 개수만큼 시도
+            try:
+                search_query = title
+                request = self.youtube.search().list(
+                    q=search_query,
+                    channelId=self.channel_id,
+                    part='id',
+                    maxResults=1,
+                    type='video'
+                )
+                response = request.execute()
+                
+                if response['items']:
+                    video_id = response['items'][0]['id']['videoId']
+                    return f"https://www.youtube.com/embed/{video_id}"
+                    
+            except Exception as e:
+                if 'quota' in str(e).lower() or '403' in str(e):
+                    print(f"API 키 할당량 초과 또는 403 에러. 다음 키로 전환 시도")
+                    self.switch_to_next_key()
+                    continue
+                else:
+                    print(f"YouTube API 에러: {e}")
+                    break
         
-        return ""
+        print("모든 API 키 시도 실패")
+        return "https://www.youtube.com/embed/"  # 기본값 반환
 
 class SermonProcessor:
     def __init__(self):
@@ -200,7 +232,8 @@ class SermonProcessor:
         
         try:
             # RTF 경로를 TXT 경로로 변환
-            txt_path = file_path.replace('/내용/', '/변환/').replace('.rtf', '.txt')
+            txt_path = file_path.replace(os.path.join('contents', '내용'), 
+                                       os.path.join('contents', '변환')).replace('.rtf', '.txt')
             
             if not os.path.exists(txt_path):
                 print(f"TXT 파일이 없습니다: {txt_path}")
@@ -221,9 +254,13 @@ class SermonProcessor:
                 
             # 썸네일 경로 처리
             # 파일 경로에서 연도와 파일명 추출
-            path_parts = file_path.split('/')
+            path_parts = os.path.normpath(file_path).split(os.sep)
             year = path_parts[-2]  # 연도 폴더명
-            date_str = path_parts[-1].replace('.rtf', '')
+            date_str = os.path.splitext(path_parts[-1])[0]  # 확장자 제거
+            
+            print(f"파일 경로 분석: {path_parts}")
+            print(f"추출된 연도: {year}")
+            print(f"추출된 날짜: {date_str}")
             
             # 썸네일 경로 구성 (연도 폴더 포함)
             thumbnail_path = os.path.join('contents', '썸네일', year, f"{date_str}.jpg")
@@ -269,10 +306,305 @@ class SermonProcessor:
 인천순복음교회 032)421 0091"""
         return content.strip()
 
+class WebsiteAutomation:
+    def __init__(self):
+        self.driver = None
+        self.wait = None
+        self.is_logged_in = False  # 로그인 상태 추적
+        
+    def start_browser(self):
+        """브라우저 시작"""
+        try:
+            if not self.driver:  # 드라이버가 없을 때만 새로 시작
+                chrome_options = Options()
+                self.driver = webdriver.Chrome(options=chrome_options)
+                self.wait = WebDriverWait(self.driver, 10)
+                self.driver.get("http://admin.harmony7hyo.com/core/admin/login/login.php")
+            elif not self.is_logged_in:  # 드라이버는 있지만 로그인이 필요한 경우
+                self.driver.get("http://admin.harmony7hyo.com/core/admin/login/login.php")
+            else:  # 이미 로그인된 상태면 에디터 페이지로 이동
+                self.driver.get("http://admin.harmony7hyo.com/core/admin/vod/write.php?1=1&pageCode=16&category=&keyfield=&key=")
+                
+        except Exception as e:
+            print(f"브라우저 시작 중 오류: {e}")
+            self.close()
+            raise e
+
+    def close(self):
+        """브라우저 종료"""
+        try:
+            if self.driver:
+                # 열려있는 모든 창 닫기
+                for handle in self.driver.window_handles:
+                    self.driver.switch_to.window(handle)
+                    self.driver.close()
+                
+                # 드라이버 종료
+                self.driver.quit()
+                self.driver = None
+                self.wait = None
+                
+                # 잠시 대기하여 완전히 종료되도록 함
+                time.sleep(1)
+        except Exception as e:
+            print(f"브라우저 종료 중 오류: {e}")
+            # 오류가 발생해도 드라이버 참조 제거
+            self.driver = None
+            self.wait = None
+
+    def __del__(self):
+        """소멸자에서 브라우저 강제 종료"""
+        self.close()
+
+    def login(self, username, password):
+        """로그인"""
+        try:
+            if self.is_logged_in:  # 이미 로그인된 상태면 True 반환
+                return True
+                
+            # ID 입력
+            id_input = self.wait.until(
+                EC.presence_of_element_located((By.NAME, "id"))
+            )
+            id_input.send_keys(username)
+            
+            # 비밀번호 입력
+            password_input = self.driver.find_element(By.NAME, "password")
+            password_input.send_keys(password)
+            
+            # 로그인 버튼 클릭
+            login_btn = self.driver.find_element(By.CLASS_NAME, "btn_01")
+            login_btn.click()
+            
+            # 로그인 성공 확인
+            self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div[menucode='content']"))
+            )
+
+            # 직접 등록 페이지로 이동
+            self.driver.get("http://admin.harmony7hyo.com/core/admin/vod/write.php?1=1&pageCode=16&category=&keyfield=&key=")
+            
+            self.is_logged_in = True  # 로그인 상태 설정
+            return True
+            
+        except Exception as e:
+            print(f"로그인 중 오류 발생: {e}")
+            self.is_logged_in = False
+            return False
+
+    def upload_sermon(self, sermon_data):
+        """설교 업로드"""
+        try:
+            print("업로드 시작...")
+            print(f"전달받은 sermon_data: {sermon_data}")  # 전체 데이터 출력
+            
+            # 카테고리 선택
+            category_select = Select(self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "select.radius3px.formSelect[name='category']"))
+            ))
+            
+            # 성경 구절에 따라 적절한 카테고리 선택
+            bible_verse = sermon_data['bible_verse']
+            category_value = self.get_category_value(bible_verse)
+            if category_value:
+                category_select.select_by_value(str(category_value))
+            
+            # 날짜 선택
+            date = sermon_data['date']
+            
+            # 년도 선택
+            year_select = Select(self.driver.find_element(
+                By.CSS_SELECTOR, 
+                "select[name='year'].radius3px.formSelect"
+            ))
+            year_select.select_by_value(str(date.year))
+            
+            # 월 선택
+            month_select = Select(self.driver.find_element(
+                By.CSS_SELECTOR, 
+                "select[name='month'].radius3px.formSelect"
+            ))
+            month_select.select_by_value(str(date.month).zfill(2))
+            
+            # 일 선택
+            day_select = Select(self.driver.find_element(
+                By.CSS_SELECTOR, 
+                "select[name='day'].radius3px.formSelect"
+            ))
+            day_select.select_by_value(str(date.day).zfill(2))
+            
+            # 제목 입력
+            title_input = self.wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "input[name='subject'].radius3px.basicTextinput")
+            ))
+            title_input.send_keys(sermon_data['title'])
+            
+            # 설교자 입력
+            preacher_input = self.driver.find_element(
+                By.CSS_SELECTOR, "input[name='preacher'].radius3px.basicTextinput"
+            )
+            preacher_input.send_keys(sermon_data['preacher'])
+            
+            # 본문 입력
+            bible_verse_input = self.driver.find_element(
+                By.CSS_SELECTOR, "input[name='word'].radius3px.basicTextinput"
+            )
+            bible_verse_input.send_keys(sermon_data['bible_verse'])
+            
+            # 유튜브 URL 입력
+            youtube_input = self.driver.find_element(
+                By.CSS_SELECTOR, "input[name='vodFile_1'].radius3px.basicTextinput"
+            )
+            youtube_input.send_keys(sermon_data['youtube_url'])
+            
+            # 썸네일 업로드
+            print(f"썸네일 정보 확인: {sermon_data.get('thumbnail', '없음')}")  # 썸네일 정보 출력
+            
+            if sermon_data.get('thumbnail'):  # get 메서드로 안전하게 확인
+                try:
+                    print(f"썸네일 업로드 시도: {sermon_data['thumbnail']}")
+                    
+                    # 파일 업로드 input 찾기 (여러 방법 시도)
+                    file_input = None
+                    try:
+                        # 방법 1: name으로 찾기
+                        file_input = self.wait.until(
+                            EC.presence_of_element_located((By.NAME, "thumbnail"))
+                        )
+                    except Exception as e1:
+                        print(f"방법 1 실패: {e1}")
+                        try:
+                            # 방법 2: CSS 셀렉터로 찾기
+                            file_input = self.wait.until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file'][name='thumbnail']"))
+                            )
+                        except Exception as e2:
+                            print(f"방법 2 실패: {e2}")
+                            try:
+                                # 방법 3: XPath로 찾기
+                                file_input = self.wait.until(
+                                    EC.presence_of_element_located((By.XPATH, "//input[@type='file' and @name='thumbnail']"))
+                                )
+                            except Exception as e3:
+                                print(f"방법 3 실패: {e3}")
+                    
+                    if file_input:
+                        # 절대 경로로 변환
+                        abs_thumbnail_path = os.path.abspath(sermon_data['thumbnail'])
+                        print(f"썸네일 절대 경로: {abs_thumbnail_path}")
+                        print(f"파일 존재 여부: {os.path.exists(abs_thumbnail_path)}")
+                        
+                        # JavaScript로 파일 input의 스타일을 변경하여 보이게 만들기
+                        self.driver.execute_script("arguments[0].style.display = 'block';", file_input)
+                        
+                        # 파일 업로드
+                        file_input.send_keys(abs_thumbnail_path)
+                        print("썸네일 업로드 완료")
+                    else:
+                        print("파일 업로드 input 요소를 찾을 수 없습니다.")
+                    
+                except Exception as e:
+                    print(f"썸네일 업로드 중 오류 발생: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("썸네일 정보가 없습니다.")
+            
+            # 내용 입력 (iframe)
+            iframe = self.wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "iframe.cke_wysiwyg_frame")
+            ))
+            self.driver.switch_to.frame(iframe)
+            
+            # iframe 내부의 body에 내용 입력
+            content_body = self.wait.until(EC.presence_of_element_located(
+                (By.TAG_NAME, "body")
+            ))
+            content_body.click()  # 편집기 활성화
+            content_body.send_keys(sermon_data['content'])
+            
+            # 기본 프레임으로 복귀
+            self.driver.switch_to.default_content()
+            
+            # 방송등록 버튼 찾아 클릭 (여러 방법 시도)
+            try:
+                register_btn = self.wait.until(
+                    EC.element_to_be_clickable((By.XPATH, "//p[contains(@class, 'adminBtn02') and contains(text(), '방송등록')]"))
+                )
+                register_btn.click()
+                time.sleep(10)  # 등록 완료 대기
+                
+                # 새로운 에디터 페이지로 이동
+                self.driver.get("http://admin.harmony7hyo.com/core/admin/vod/write.php?1=1&pageCode=16&category=&keyfield=&key=")
+                return True
+                
+            except Exception as e2:
+                print(f"방송등록 버튼 클릭 실패: {e2}")
+                try:
+                    self.driver.execute_script("checkValue();")
+                    time.sleep(2)
+                    self.driver.get("http://admin.harmony7hyo.com/core/admin/vod/write.php?1=1&pageCode=16&category=&keyfield=&key=")
+                    return True
+                except Exception as e3:
+                    print(f"JavaScript 실행 실패: {e3}")
+                    return False
+                
+        except Exception as e:
+            print(f"업로드 중 오류 발생: {e}")
+            return False
+
+    def get_category_value(self, bible_verse):
+        """성경 구절에 따른 카테고리 값 반환"""
+        category_mapping = {
+            '창세기': '2',
+            '출애굽기': '1',
+            '레위기': '3', '민수기': '3',
+            '신명기': '4', '여호수아': '4',
+            '사사기': '5', '룻기': '5',
+            '사무엘상': '6', '사무엘하': '6',
+            '열왕기상': '7', '열왕기하': '7',
+            '역대상': '8', '역대하': '8',
+            '에스라': '9', '느헤미야': '9', '에스더': '9',
+            '욥기': '10', '시편': '10',
+            '잠언': '11', '전도서': '11',
+            '아가': '12', '이사야': '12',
+            '예레미야': '13', '예레미야애가': '13',
+            '에스겔': '14', '다니엘': '14', '호세아': '14',
+            '요엘': '15', '아모스': '15', '오바댜': '15',
+            '요나': '16', '미가': '16', '나훔': '16',
+            '하박국': '17', '스바냐': '17',
+            '학개': '18', '스가랴': '18', '말라기': '18',
+            '마태복음': '19',
+            '마가복음': '20',
+            '누가복음': '21',
+            '요한복음': '22',
+            '사도행전': '23',
+            '로마서': '24',
+            '고린도전서': '25', '고린도후서': '25',
+            '갈라디아서': '26', '에베소서': '26',
+            '빌립보서': '27', '골로새서': '27',
+            '데살로니가전서': '28', '데살로니가후서': '28',
+            '디모데전서': '29', '디모데후서': '29',
+            '디도서': '30', '빌레몬서': '30',
+            '히브리서': '31', '야고보서': '31',
+            '베드로전서': '32', '베드로후서': '32',
+            '요한일서': '33', '요한이서': '33', '요한삼서': '33',
+            '유다서': '34', '요한계시록': '34'
+        }
+        
+        # 성경 구절에서 책 이름 추출
+        book_name = bible_verse.split(' ')[0]
+        return category_mapping.get(book_name)
+
 class SermonUploaderUI(QMainWindow):
+    # 시그널 정의
+    update_item_signal = pyqtSignal(QListWidgetItem)
+    
     def __init__(self):
         super().__init__()
         self.processor = SermonProcessor()
+        self.automation = WebsiteAutomation()
+        self.sermon_cache = {}  # 설교 데이터 캐시 추가
         
         # OS 확인
         self.is_mac = platform.system() == 'Darwin'
@@ -299,6 +631,9 @@ class SermonUploaderUI(QMainWindow):
         
         # UI 초기화
         self.init_ui()
+
+        # 시그널 연결
+        self.update_item_signal.connect(self._update_item_status)
 
     def init_ui(self):
         """UI 초기화"""
@@ -333,6 +668,22 @@ class SermonUploaderUI(QMainWindow):
             }
             QPushButton:hover {
                 background-color: #45a049;
+            }
+        """)
+        
+        # 병렬 업로드 버튼 추가
+        self.parallel_upload_button = QPushButton('미등록 설교 일괄 업로드')
+        self.parallel_upload_button.clicked.connect(self.parallel_upload)
+        self.parallel_upload_button.setStyleSheet("""
+            QPushButton {
+                padding: 8px 15px;
+                background-color: #ff6b6b;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #ff5252;
             }
         """)
         
@@ -425,6 +776,7 @@ class SermonUploaderUI(QMainWindow):
         auto_input_layout.addWidget(self.step_label)
         auto_input_layout.addWidget(self.set_positions_button)
         auto_input_layout.addWidget(self.macro_button)
+        auto_input_layout.addWidget(self.parallel_upload_button)
         auto_input_layout.addStretch()
         
         right_layout.addRow('', auto_input_layout)  # 빈 레이블로 첫 번째 열 비워두기
@@ -432,6 +784,10 @@ class SermonUploaderUI(QMainWindow):
         copy_button = QPushButton('클립보드에 복사')
         copy_button.clicked.connect(self.copy_to_clipboard)
         right_layout.addRow(copy_button)
+        
+        upload_button = QPushButton('웹사이트에 업로드')
+        upload_button.clicked.connect(self.upload_to_website)
+        right_layout.addRow(upload_button)
         
         right_panel.setLayout(right_layout)
         
@@ -517,7 +873,7 @@ class SermonUploaderUI(QMainWindow):
         
         # 날짜순으로 정렬하고 완료되지 않은 항목을 먼저 표시
         file_items.sort(key=lambda x: (x['completed'], x['date']))
-        
+
         # 리스트에 아이템 추가
         visible_count = 0
         for idx, item_info in enumerate(file_items, 1):
@@ -587,41 +943,48 @@ class SermonUploaderUI(QMainWindow):
         
         # 보이는 항목 수 업데이트
         visible_count = sum(1 for i in range(self.file_list.count()) if not self.file_list.item(i).isHidden())
+        
         total_count = self.file_list.count()
         self.file_count_label.setText(f'설교 파일 목록 ({visible_count}/{total_count}개)')
 
     def load_sermon(self, item):
         """설교 정보 로드"""
-        # UserRole에서 실제 파일 경로를 가져옴
-        file_path = item.data(Qt.UserRole)
-        sermon_info = self.processor.extract_sermon_info(file_path)
-        date = self.processor.parse_date(os.path.basename(file_path))
-        
-        # UI 업데이트
-        self.date_edit.setDate(date)
-        self.title.setText(sermon_info.get('title', ''))
-        self.preacher.setText('최성규 목사')
-        self.bible_verse.setText(sermon_info.get('bible_verse', ''))
-        
-        # 썸네일 표시
-        if 'thumbnail' in sermon_info:
-            self.thumbnail_label.set_image(sermon_info['thumbnail'])
-        else:
-            self.thumbnail_label.clear()
-            self.thumbnail_label.setText('썸네일 없음')
-        
-        # YouTube 검색
-        youtube_url = self.processor.youtube_api.search_sermon(sermon_info.get('title', ''), date)
-        if youtube_url:
-            self.youtube_embed.setText(youtube_url)
+        try:
+            # UserRole에서 실제 파일 경로를 가져옴
+            file_path = item.data(Qt.UserRole)
+            sermon_info = self.processor.extract_sermon_info(file_path)
+            date = self.processor.parse_date(os.path.basename(file_path))
             
-        # 성경 구절 가져오기
-        bible_text = self.processor.bible_api.get_verse(sermon_info.get('bible_verse', ''))
-        
-        # 내용 생성
-        content = self.processor.generate_content(sermon_info, date, bible_text)
-        self.content.setText(content)
-        
+            # UI 업데이트
+            self.date_edit.setDate(date)
+            self.title.setText(sermon_info.get('title', ''))
+            self.preacher.setText('최성규 목사')
+            self.bible_verse.setText(sermon_info.get('bible_verse', ''))
+            
+            # 썸네일 표시
+            if 'thumbnail' in sermon_info:
+                self.thumbnail_label.set_image(sermon_info['thumbnail'])
+            else:
+                self.thumbnail_label.clear()
+                self.thumbnail_label.setText('썸네일 없음')
+            
+            # YouTube 검색 - 선택된 설교에 대해서만 수행
+            if sermon_info.get('title'):
+                youtube_url = self.processor.youtube_api.search_sermon(sermon_info['title'], date)
+                self.youtube_embed.setText(youtube_url if youtube_url else '')
+            
+            # 성경 구절 가져오기
+            bible_text = self.processor.bible_api.get_verse(sermon_info.get('bible_verse', ''))
+            
+            # 내용 생성
+            content = self.processor.generate_content(sermon_info, date, bible_text)
+            self.content.setText(content)
+            
+        except Exception as e:
+            print(f"설교 정보 로드 중 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+
     def on_key_press(self, key):
         """키보드 입력 감지"""
         try:
@@ -745,7 +1108,7 @@ class SermonUploaderUI(QMainWindow):
                     self.thumbnail_label.set_image(thumbnail_path)
                     QMessageBox.information(self, '성공', '썸네일이 저장되었습니다.')
                 else:
-                    QMessageBox.warning(self, '오류', '썸네일 저장에 실패했습니다.')
+                    QMessageBox.warning(None, '오류', '썸네일 저장에 실패했습니다.')
         except Exception as e:
             QMessageBox.warning(self, '오류', f'썸네일 처리 중 오류가 발생했습니다: {str(e)}')
 
@@ -766,6 +1129,8 @@ class SermonUploaderUI(QMainWindow):
     def closeEvent(self, event):
         """프로그램 종료 시 키보드 리스너 정리"""
         self.keyboard_listener.stop()
+        if self.automation:
+            self.automation.close()
         event.accept()
 
     def set_click_positions(self):
@@ -872,6 +1237,192 @@ class SermonUploaderUI(QMainWindow):
             
         except Exception as e:
             QMessageBox.warning(self, '오류', f'매크로 실행 중 오류가 발생했습니다: {str(e)}')
+
+    def upload_to_website(self):
+        """웹사이트에 업로드"""
+        try:
+            # 현재 선택된 아이템 가져오기
+            current_item = self.file_list.currentItem()
+            if not current_item:
+                QMessageBox.warning(self, '경고', '업로드할 설교를 선택해주세요.')
+                return
+            
+            # 파일 경로 가져오기
+            file_path = current_item.data(Qt.UserRole)
+            date = self.processor.parse_date(os.path.basename(file_path))
+            
+            # 썸네일 경로 구성
+            year = os.path.basename(os.path.dirname(file_path))
+            date_str = os.path.splitext(os.path.basename(file_path))[0]
+            thumbnail_path = os.path.join('contents', '썸네일', year, f"{date_str}.jpg")
+            
+            # jpg가 없다면 png 확인
+            if not os.path.exists(thumbnail_path):
+                thumbnail_path = thumbnail_path.replace('.jpg', '.png')
+            
+            print(f"썸네일 경로 확인: {thumbnail_path}")
+            print(f"썸네일 존재 여부: {os.path.exists(thumbnail_path)}")
+            
+            # 업로드할 데이터 구성
+            sermon_data = {
+                'date': date,
+                'title': self.title.text(),
+                'preacher': self.preacher.text(),
+                'bible_verse': self.bible_verse.text(),
+                'youtube_url': self.processor.youtube_api.search_sermon(self.title.text(), date),
+                'content': self.processor.generate_content(self.processor.extract_sermon_info(file_path), date, 
+                    self.processor.bible_api.get_verse(self.bible_verse.text())),
+                'thumbnail': thumbnail_path if os.path.exists(thumbnail_path) else None
+            }
+            
+            print(f"업로드할 데이터: {sermon_data}")
+            
+            # 웹사이트 자동화 시작 (기존 세션 활용)
+            self.automation.start_browser()
+            
+            # 로그인 (이미 로그인된 경우 스킵됨)
+            username = os.getenv('WEBSITE_USERNAME')
+            password = os.getenv('WEBSITE_PASSWORD')
+            
+            if self.automation.login(username, password):
+                if self.automation.upload_sermon(sermon_data):
+                    QMessageBox.information(self, '성공', '업로드가 완료되었습니다.')
+                else:
+                    QMessageBox.warning(self, '실패', '업로드 중 오류가 발생했습니다.')
+            else:
+                QMessageBox.warning(self, '실패', '로그인에 실패했습니다.')
+            
+        except Exception as e:
+            print(f"업로드 중 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, '오류', f'업로드 중 오류가 발생했습니다.\n{str(e)}')
+        
+        finally:
+            # 브라우저 종료 보장
+            try:
+                if self.automation:
+                    self.automation.close()
+                    time.sleep(1)  # 완전히 종료될 때까지 대기
+            except Exception as e:
+                print(f"브라우저 종료 중 추가 오류: {e}")
+
+    def parallel_upload(self):
+        """미등록 설교 일괄 업로드"""
+        # 현재 선택된 항목 확인
+        current_item = self.file_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, '알림', '업로드를 시작할 설교를 선택해주세요.')
+            return
+        
+        # 확인 대화상자
+        current_number = int(current_item.text().split('.')[0])
+        reply = QMessageBox.question(
+            self, 
+            '확인', 
+            f'{current_number}번 설교부터 순차적으로 업로드하시겠습니까?',
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.No:
+            return
+        
+        # 선택된 항목부터 끝까지의 항목들 수집
+        upload_items = []
+        found_current = False
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if not found_current:
+                if item == current_item:
+                    found_current = True
+                else:
+                    continue
+            
+            if item.checkState() == Qt.Unchecked:  # 미등록 항목만 추가
+                upload_items.append(item)
+        
+        if not upload_items:
+            QMessageBox.information(self, '알림', '업로드할 설교가 없습니다.')
+            return
+        
+        print(f"업로드 대상: {len(upload_items)}개 (#{current_number}번부터)")
+        
+        # 업로드 스레드 시작
+        self.upload_thread = threading.Thread(
+            target=self.process_uploads, 
+            args=(upload_items,)
+        )
+        self.upload_thread.start()
+
+    def process_uploads(self, items):
+        """설교 순차 업로드 처리"""
+        try:
+            self.current_automation = WebsiteAutomation()
+            self.current_automation.start_browser()
+            
+            username = os.getenv('WEBSITE_USERNAME')
+            password = os.getenv('WEBSITE_PASSWORD')
+            if not self.current_automation.login(username, password):
+                raise Exception("로그인 실패")
+            
+            for item in items:
+                try:
+                    file_path = item.data(Qt.UserRole)
+                    
+                    if file_path in self.sermon_cache:
+                        sermon_data = self.sermon_cache[file_path]
+                        print(f"캐시된 데이터 사용: {sermon_data['title']}")
+                    else:
+                        sermon_info = self.processor.extract_sermon_info(file_path)
+                        date = self.processor.parse_date(os.path.basename(file_path))
+                        youtube_url = self.processor.youtube_api.search_sermon(sermon_info.get('title', ''), date)
+                        sermon_data = {
+                            'date': date,
+                            'title': sermon_info.get('title', ''),
+                            'preacher': '최성규 목사',
+                            'bible_verse': sermon_info.get('bible_verse', ''),
+                            'youtube_url': youtube_url,  # 이미 기본값이 설정되어 있음
+                            'content': self.processor.generate_content(sermon_info, date, 
+                                self.processor.bible_api.get_verse(sermon_info.get('bible_verse', ''))),
+                            'thumbnail': sermon_info.get('thumbnail')
+                        }
+                        self.sermon_cache[file_path] = sermon_data
+                    
+                    if self.current_automation.upload_sermon(sermon_data):
+                        self.update_item_signal.emit(item)
+                        print(f"업로드 성공: {sermon_data['title']}")
+                    else:
+                        print(f"업로드 실패: {sermon_data['title']}")
+                    
+                    gc.collect()
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    print(f"개별 업로드 중 오류 발생: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+                    
+        except Exception as e:
+            print(f"전체 업로드 프로세스 오류: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print("업로드 프로세스 완료")
+            self.current_automation = None
+            gc.collect()
+
+    @pyqtSlot(QListWidgetItem)
+    def _update_item_status(self, item):
+        """실제 UI 업데이트 수행"""
+        try:
+            if not sip.isdeleted(item):  # 객체가 유효한지 확인
+                item.setCheckState(Qt.Checked)
+                item.setForeground(QColor('#888888'))
+                self.save_completed_items()
+                print(f"항목 상태 업데이트 완료: {item.text()}")
+        except Exception as e:
+            print(f"UI 업데이트 중 오류: {e}")
 
 class ThumbnailLabel(QLabel):
     """드래그 가능한 썸네일 레이블"""
