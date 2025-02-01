@@ -353,6 +353,10 @@ class SermonUploaderUI(QMainWindow):
         search_layout.addWidget(self.search_input)
         left_layout.addLayout(search_layout)
         
+        # 파일 카운트 레이블
+        self.file_count_label = QLabel('설교 파일 목록 (0개)')
+        left_layout.addWidget(self.file_count_label)
+        
         # 파일 리스트 설정
         file_list_layout = self.setup_file_list()  # 한 번만 호출
         left_layout.addWidget(QLabel('설교 파일 목록'))
@@ -535,6 +539,11 @@ class SermonUploaderUI(QMainWindow):
             
             self.file_list.addItem(item)
 
+        # 파일 개수 업데이트
+        visible_count = sum(1 for i in range(self.file_list.count()) if not self.file_list.item(i).isHidden())
+        total_count = self.file_list.count()
+        self.file_count_label.setText(f'설교 파일 목록 ({visible_count}/{total_count}개)')
+
     def toggle_completed_items(self):
         """완료된 항목 표시/숨기기 토글"""
         self.show_completed = not getattr(self, 'show_completed', False)
@@ -570,7 +579,12 @@ class SermonUploaderUI(QMainWindow):
         for i in range(self.file_list.count()):
             item = self.file_list.item(i)
             item.setHidden(text.lower() not in item.text().lower())
-            
+        
+        # 보이는 항목 수 업데이트
+        visible_count = sum(1 for i in range(self.file_list.count()) if not self.file_list.item(i).isHidden())
+        total_count = self.file_list.count()
+        self.file_count_label.setText(f'설교 파일 목록 ({visible_count}/{total_count}개)')
+
     def load_sermon(self, item):
         """설교 정보 로드"""
         file_path = item.text()
