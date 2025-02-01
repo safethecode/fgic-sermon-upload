@@ -519,29 +519,34 @@ class SermonUploaderUI(QMainWindow):
         file_items.sort(key=lambda x: (x['completed'], x['date']))
         
         # 리스트에 아이템 추가
-        for item_info in file_items:
+        visible_count = 0
+        for idx, item_info in enumerate(file_items, 1):
             # 완료된 항목이고 숨김 설정인 경우 건너뛰기
             if item_info['completed'] and not self.show_completed:
                 continue
                 
-            item = QListWidgetItem(item_info['path'])
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if item_info['completed'] else Qt.Unchecked)
-            
-            # 날짜 표시 추가
+            # 날짜 형식 변환
             date_str = item_info['date']
             formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-            item.setToolTip(formatted_date)  # 마우스 오버시 날짜 표시
+            
+            # 순번과 날짜를 포함한 표시 텍스트 생성
+            display_text = f"{idx:03d}. [{formatted_date}] {os.path.basename(item_info['path'])}"
+            
+            item = QListWidgetItem(display_text)
+            # 원본 파일 경로는 userData에 저장
+            item.setData(Qt.UserRole, item_info['path'])
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if item_info['completed'] else Qt.Unchecked)
             
             # 완료된 항목은 회색으로 표시
             if item_info['completed']:
                 item.setForeground(QColor('#888888'))
             
             self.file_list.addItem(item)
+            visible_count += 1
 
         # 파일 개수 업데이트
-        visible_count = sum(1 for i in range(self.file_list.count()) if not self.file_list.item(i).isHidden())
-        total_count = self.file_list.count()
+        total_count = len(file_items)
         self.file_count_label.setText(f'설교 파일 목록 ({visible_count}/{total_count}개)')
 
     def toggle_completed_items(self):
@@ -587,7 +592,8 @@ class SermonUploaderUI(QMainWindow):
 
     def load_sermon(self, item):
         """설교 정보 로드"""
-        file_path = item.text()
+        # UserRole에서 실제 파일 경로를 가져옴
+        file_path = item.data(Qt.UserRole)
         sermon_info = self.processor.extract_sermon_info(file_path)
         date = self.processor.parse_date(os.path.basename(file_path))
         
